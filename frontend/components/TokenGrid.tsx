@@ -18,12 +18,12 @@ export default function TokenGrid({
             key={index}
             className="rounded-lg border border-border bg-surface p-4"
           >
-            <div className="h-4 w-16 rounded bg-white/5" />
-            <div className="mt-5 h-8 w-28 rounded bg-white/5" />
-            <div className="mt-5 h-16 rounded bg-white/5" />
+            <div className="skeleton h-4 w-16" />
+            <div className="skeleton mt-5 h-8 w-28" />
+            <div className="skeleton mt-5 h-16" />
             <div className="mt-5 grid grid-cols-2 gap-2">
-              <div className="h-12 rounded bg-white/5" />
-              <div className="h-12 rounded bg-white/5" />
+              <div className="skeleton h-12" />
+              <div className="skeleton h-12" />
             </div>
           </div>
         ))}

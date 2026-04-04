@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import json
-
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import Token, PriceSnapshot
+from ..models import Token
 from ..schemas import TokenPrice, TokenListResponse
 from ..core.cache import price_cache
+from ..core.config import settings
 
 router = APIRouter()
 
@@ -42,4 +42,6 @@ async def list_tokens(db: AsyncSession = Depends(get_db)):
                 last_updated=price_data.get("last_updated"),
             )
         )
-    return TokenListResponse(tokens=items)
+    resp = JSONResponse(content=TokenListResponse(tokens=items).model_dump())
+    resp.headers["Cache-Control"] = f"public, max-age={settings.price_refresh_seconds // 2}"
+    return resp

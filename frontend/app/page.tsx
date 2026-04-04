@@ -8,16 +8,18 @@ import PredictionHistory from "@/components/PredictionHistory";
 import { cn, formatPct, formatPrice, formatUSD, pctColor } from "@/lib/utils";
 
 export default function HomePage() {
-  const { data: tokenData } = useQuery({
+  const { data: tokenData, isLoading: tokensLoading } = useQuery({
     queryKey: ["tokens"],
     queryFn: fetchTokens,
     refetchInterval: 30_000,
+    staleTime: 30_000,
   });
 
   const { data: historyData } = useQuery({
     queryKey: ["predictions", "home"],
     queryFn: () => fetchPredictions({ limit: 5 }),
     refetchInterval: 30_000,
+    staleTime: 30_000,
   });
 
   const tokens = tokenData?.tokens ?? [];
@@ -89,7 +91,23 @@ export default function HomePage() {
               </div>
 
               <div className="mt-4 space-y-2">
-                {featuredTokens.length ? (
+                {tokensLoading ? (
+                  Array.from({ length: 4 }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center justify-between border-b border-border px-1 py-2.5 last:border-0"
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className="skeleton h-4 w-10" />
+                        <div className="skeleton h-3 w-16" />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="skeleton h-3 w-14" />
+                        <div className="skeleton h-3 w-12" />
+                      </div>
+                    </div>
+                  ))
+                ) : featuredTokens.length ? (
                   featuredTokens.map((token) => (
                     <div
                       key={token.symbol}
@@ -120,7 +138,7 @@ export default function HomePage() {
                   ))
                 ) : (
                   <p className="py-4 text-xs text-txt-tertiary">
-                    Loading...
+                    No data available
                   </p>
                 )}
               </div>

@@ -11,7 +11,7 @@ from .core.config import settings
 from .database import engine, async_session
 from .models import Base
 from .services.token_registry import seed_tokens
-from .services.market_data import refresh_prices
+from .services.market_data import refresh_prices, load_prices_from_db
 from .api.routes_tokens import router as tokens_router
 from .api.routes_prices import router as prices_router
 from .api.routes_predictions import router as predictions_router
@@ -36,7 +36,14 @@ async def lifespan(app: FastAPI):
         await seed_tokens(db)
     logger.info("Database initialized and tokens seeded")
 
-    # Initial price fetch
+    # Load cached prices from DB so the first request is instant
+    db_prices = await load_prices_from_db()
+    if db_prices:
+        from .core.cache import price_cache
+        price_cache["all_prices"] = db_prices
+        logger.info("Warm-started cache from DB (%d tokens)", len(db_prices))
+
+    # Initial price fetch (updates cache + DB)
     await refresh_prices()
 
     # Start background price refresh

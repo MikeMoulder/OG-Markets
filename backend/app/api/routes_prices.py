@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from ..core.cache import price_cache
+from ..core.config import settings
 from ..schemas import PricesResponse
 
 router = APIRouter()
@@ -22,4 +24,8 @@ async def get_prices():
         (d.get("last_updated") for d in cached.values() if d.get("last_updated")),
         None,
     )
-    return PricesResponse(prices=prices, updated_at=updated)
+    resp = JSONResponse(
+        content=PricesResponse(prices=prices, updated_at=updated).model_dump()
+    )
+    resp.headers["Cache-Control"] = f"public, max-age={settings.price_refresh_seconds // 2}"
+    return resp

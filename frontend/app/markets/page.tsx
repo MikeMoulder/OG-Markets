@@ -16,12 +16,14 @@ export default function MarketsPage() {
     queryKey: ["tokens"],
     queryFn: fetchTokens,
     refetchInterval: 30_000,
+    staleTime: 30_000,
   });
 
   const { data: historyData } = useQuery({
     queryKey: ["predictions", "markets"],
     queryFn: () => fetchPredictions({ limit: 6 }),
     refetchInterval: 30_000,
+    staleTime: 30_000,
   });
 
   const tokens = tokenData?.tokens ?? [];

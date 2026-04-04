@@ -15,9 +15,14 @@ logger = logging.getLogger(__name__)
 
 async def fetch_all_prices() -> dict[str, dict]:
     """Fetch prices for all curated tokens from CoinGecko bulk endpoint."""
+    headers: dict[str, str] = {}
+    if settings.coingecko_api_key:
+        headers["x-cg-demo-api-key"] = settings.coingecko_api_key
+
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(
             f"{settings.coingecko_base_url}/coins/markets",
+            headers=headers,
             params={
                 "vs_currency": "usd",
                 "ids": COINGECKO_IDS,

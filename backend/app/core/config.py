@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     # CoinGecko
     coingecko_base_url: str = "https://api.coingecko.com/api/v3"
+    coingecko_api_key: str | None = None
 
     # OpenGradient
     opengradient_enabled: bool = Field(default=True)

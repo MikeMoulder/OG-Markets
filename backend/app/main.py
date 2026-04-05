@@ -54,7 +54,26 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
-allowed_origins = [settings.frontend_origin, "https://og-markets.vercel.app"]
+def _normalize_origin(value: str) -> str:
+    return value.strip().rstrip("/")
+
+
+def _allowed_origins() -> list[str]:
+    configured = [settings.frontend_origin, "https://og-markets.vercel.app"]
+    if settings.frontend_origins:
+        configured.extend(part for part in settings.frontend_origins.split(",") if part.strip())
+
+    configured.extend([
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ])
+
+    return list(dict.fromkeys(_normalize_origin(origin) for origin in configured if origin.strip()))
+
+
+allowed_origins = _allowed_origins()
 
 app.add_middleware(
     CORSMiddleware,

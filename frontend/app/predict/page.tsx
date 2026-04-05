@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useEffect } from "react";
+import { Suspense, useEffect, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { useMutation } from "@tanstack/react-query";
 import { ArrowLeft, Loader2 } from "lucide-react";
@@ -12,9 +12,11 @@ import PredictionCard from "@/components/PredictionCard";
 
 function PredictContent() {
   const searchParams = useSearchParams();
+  const lastAutoRequestKeyRef = useRef<string | null>(null);
 
   const symbol = searchParams.get("symbol")?.toUpperCase() || "";
   const timeframe = searchParams.get("timeframe") || "1h";
+  const requestKey = `${symbol}:${timeframe}`;
 
   const { mutate, data, isPending, isError, error } = useMutation<
     PredictionResponse,
@@ -24,10 +26,14 @@ function PredictContent() {
   });
 
   useEffect(() => {
-    if (symbol && !data && !isPending) {
+    if (!symbol) return;
+    if (lastAutoRequestKeyRef.current === requestKey) return;
+
+    if (!data && !isPending) {
+      lastAutoRequestKeyRef.current = requestKey;
       mutate();
     }
-  }, [data, isPending, mutate, symbol, timeframe]);
+  }, [data, isPending, mutate, requestKey, symbol]);
 
   if (!symbol) {
     return (

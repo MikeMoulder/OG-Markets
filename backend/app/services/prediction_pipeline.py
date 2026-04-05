@@ -14,6 +14,17 @@ from .opengradient_client import PredictionClient
 
 logger = logging.getLogger(__name__)
 
+REQUIRED_PAYLOAD_FIELDS = {
+    "target_price",
+    "range_low",
+    "range_high",
+    "confidence_pct",
+    "direction",
+    "reasoning",
+    "key_factors",
+    "risk_factors",
+}
+
 
 async def generate_prediction(
     symbol: str, timeframe: str, db: AsyncSession
@@ -53,6 +64,13 @@ async def generate_prediction(
     prediction_result = await client.predict(symbol, timeframe, prompt_data)
 
     payload = prediction_result.payload
+    missing_fields = sorted(REQUIRED_PAYLOAD_FIELDS.difference(payload.keys()))
+    if missing_fields:
+        logger.error("Prediction payload missing fields: %s", ", ".join(missing_fields))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Invalid prediction payload from model; missing: {', '.join(missing_fields)}",
+        )
 
     # 5. Store in database
     pred = Prediction(

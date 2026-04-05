@@ -16,6 +16,10 @@ export default function ProofDrawer({ proof }: { proof: ProofBundle }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const teeSignature = proof.tee_signature;
+  const isUnknownReceipt = proof.receipt_id.startsWith("unknown-");
+  const receiptDisplayValue = isUnknownReceipt
+    ? "onchain settlement in progress"
+    : proof.receipt_id;
   const txHash =
     proof.transaction_hash && proof.transaction_hash !== "external"
       ? proof.transaction_hash
@@ -66,8 +70,8 @@ export default function ProofDrawer({ proof }: { proof: ProofBundle }) {
               <ProofField label="Settlement" value={proof.settlement_mode} />
               <ProofField
                 label="Receipt ID"
-                value={proof.receipt_id}
-                copyable
+                value={receiptDisplayValue}
+                copyable={!isUnknownReceipt}
                 copied={copied === "receipt"}
                 onCopy={() => copyToClipboard(proof.receipt_id, "receipt")}
               />

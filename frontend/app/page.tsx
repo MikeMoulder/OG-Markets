@@ -2,22 +2,36 @@
 
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { ArrowRight } from "lucide-react";
-import { fetchPredictions, fetchTokens } from "@/lib/api";
+import { fetchPredictionsSmart, fetchTokensSmart } from "@/lib/api";
 import PredictionHistory from "@/components/PredictionHistory";
 import { cn, formatPct, formatPrice, formatUSD, pctColor } from "@/lib/utils";
 
 export default function HomePage() {
+  const queryClient = useQueryClient();
+
   const { data: tokenData, isLoading: tokensLoading } = useQuery({
     queryKey: ["tokens"],
-    queryFn: fetchTokens,
+    queryFn: () =>
+      fetchTokensSmart({
+        onFreshData: (fresh) => queryClient.setQueryData(["tokens"], fresh),
+      }),
     refetchInterval: 30_000,
     staleTime: 30_000,
   });
 
   const { data: historyData } = useQuery({
     queryKey: ["predictions", "home"],
-    queryFn: () => fetchPredictions({ limit: 5 }),
+    queryFn: () =>
+      fetchPredictionsSmart(
+        { limit: 5 },
+        {
+          cacheNamespace: "home",
+          onFreshData: (fresh) =>
+            queryClient.setQueryData(["predictions", "home"], fresh),
+        }
+      ),
     refetchInterval: 30_000,
     staleTime: 30_000,
   });
@@ -98,12 +112,12 @@ export default function HomePage() {
                       className="flex items-center justify-between border-b border-border px-1 py-2.5 last:border-0"
                     >
                       <div className="flex items-center gap-2">
-                        <div className="skeleton h-4 w-10" />
-                        <div className="skeleton h-3 w-16" />
+                        <div className="h-4 w-10 rounded bg-white/5 animate-pulse" />
+                        <div className="h-3 w-16 rounded bg-white/5 animate-pulse" />
                       </div>
                       <div className="flex items-center gap-2">
-                        <div className="skeleton h-3 w-14" />
-                        <div className="skeleton h-3 w-12" />
+                        <div className="h-3 w-14 rounded bg-white/5 animate-pulse" />
+                        <div className="h-3 w-12 rounded bg-white/5 animate-pulse" />
                       </div>
                     </div>
                   ))

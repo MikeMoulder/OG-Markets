@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchPredictions, fetchTokens } from "@/lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { fetchPredictionsSmart, fetchTokensSmart } from "@/lib/api";
 import type { Timeframe } from "@/lib/types";
 import PredictionHistory from "@/components/PredictionHistory";
 import TimeframeSelector from "@/components/TimeframeSelector";
@@ -11,17 +12,29 @@ import { cn, formatPct, formatUSD, pctColor } from "@/lib/utils";
 
 export default function MarketsPage() {
   const [timeframe, setTimeframe] = useState<Timeframe>("1h");
+  const queryClient = useQueryClient();
 
   const { data: tokenData } = useQuery({
     queryKey: ["tokens"],
-    queryFn: fetchTokens,
+    queryFn: () =>
+      fetchTokensSmart({
+        onFreshData: (fresh) => queryClient.setQueryData(["tokens"], fresh),
+      }),
     refetchInterval: 30_000,
     staleTime: 30_000,
   });
 
   const { data: historyData } = useQuery({
     queryKey: ["predictions", "markets"],
-    queryFn: () => fetchPredictions({ limit: 6 }),
+    queryFn: () =>
+      fetchPredictionsSmart(
+        { limit: 6 },
+        {
+          cacheNamespace: "markets",
+          onFreshData: (fresh) =>
+            queryClient.setQueryData(["predictions", "markets"], fresh),
+        }
+      ),
     refetchInterval: 30_000,
     staleTime: 30_000,
   });

@@ -58,16 +58,29 @@ class PredictionClient:
 
         user_prompt = build_user_prompt(symbol, timeframe, market_data)
 
-        result = await llm.chat(
-            model=self._resolve_model(og),
-            messages=[
-                {"role": "system", "content": PREDICTION_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=800,
-            temperature=0.0,
-            x402_settlement_mode=self._resolve_settlement(og),
-        )
+        try:
+            result = await llm.chat(
+                model=self._resolve_model(og),
+                messages=[
+                    {"role": "system", "content": PREDICTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=800,
+                temperature=0.0,
+                x402_settlement_mode=self._resolve_settlement(og),
+            )
+        except Exception as e:
+            # OpenGradient SDK may wrap HTTP 402/transport errors in RuntimeError.
+            logger.exception("OpenGradient prediction request failed: %s", e)
+            if self.allow_mock:
+                logger.warning("Falling back to mock prediction due to OpenGradient error")
+                return self._mock_prediction(symbol, timeframe, market_data)
+
+            message = str(e)
+            status_code = 503
+            if "402" in message or "Payment Required" in message:
+                status_code = 402
+            raise HTTPException(status_code, f"OpenGradient request failed: {message}")
 
         raw_content = result.chat_output.get("content", "")
         # Strip markdown code fences if present

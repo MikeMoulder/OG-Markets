@@ -26,9 +26,9 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("OPENGRADIENT_PRIVATE_KEY", "OG_PRIVATE_KEY"),
     )
-    opengradient_model: str = "anthropic/claude-sonnet-4-6"
+    opengradient_model: str = "anthropic/claude-4.0-sonnet"
     opengradient_settlement_mode: str = "BATCH_HASHED"
-    opengradient_approval_amount: float = 5.0
+    opengradient_approval_amount: float = 50.0
     allow_mock_opengradient: bool = True
 
     # Cache & Rate Limits

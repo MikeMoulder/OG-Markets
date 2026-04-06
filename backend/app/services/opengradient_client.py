@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import enum
+import inspect
 import json
 import logging
 import random
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -28,9 +31,192 @@ class PredictionResult:
 class PredictionClient:
     _approval_done: bool = False
 
+    MODEL_ENUM_MAP = {
+        "openai/gpt-4.1-2025-04-14": "GPT_4_1_2025_04_14",
+        "openai/gpt-4o": "GPT_4O",
+        "openai/o4-mini": "O4_MINI",
+        "anthropic/claude-4.0-sonnet": "CLAUDE_4_0_SONNET",
+        "anthropic/claude-sonnet-4-6": "CLAUDE_SONNET_4_6",
+        "google/gemini-2.5-pro": "GEMINI_2_5_PRO",
+        "google/gemini-2.5-flash": "GEMINI_2_5_FLASH",
+    }
+
+    SETTLEMENT_ALIASES = {
+        "SETTLE_BATCH": "BATCH_HASHED",
+        "SETTLE_METADATA": "INDIVIDUAL_FULL",
+        "SETTLE": "INDIVIDUAL_FULL",
+    }
+
     def __init__(self) -> None:
         self.enabled = settings.opengradient_enabled
         self.allow_mock = settings.allow_mock_opengradient
+
+    @staticmethod
+    def _ensure_strenum_compat() -> None:
+        if hasattr(enum, "StrEnum"):
+            return
+
+        class _CompatStrEnum(str, enum.Enum):
+            pass
+
+        enum.StrEnum = _CompatStrEnum  # type: ignore[attr-defined]
+
+    # ── SDK resolution helpers ────────────────────────────────────────
+
+    def _resolve_model(self, og: Any) -> Any:
+        requested = settings.opengradient_model.strip()
+        model_attr = self.MODEL_ENUM_MAP.get(requested, requested)
+
+        if "/" in model_attr:
+            model_attr = model_attr.split("/")[-1]
+        model_attr = model_attr.replace("-", "_").replace(".", "_").upper()
+
+        if hasattr(og.TEE_LLM, model_attr):
+            return getattr(og.TEE_LLM, model_attr)
+
+        # Fallback chain
+        for fallback in ("GPT_4_1_2025_04_14", "CLAUDE_4_0_SONNET", "GPT_4O"):
+            if hasattr(og.TEE_LLM, fallback):
+                logger.warning(
+                    "Model enum %s not found on og.TEE_LLM, falling back to %s",
+                    model_attr,
+                    fallback,
+                )
+                return getattr(og.TEE_LLM, fallback)
+
+        raise ValueError(f"No compatible TEE_LLM model enum found in opengradient SDK (tried {model_attr})")
+
+    def _resolve_settlement(self, og: Any) -> Any:
+        mode_name = settings.opengradient_settlement_mode.upper().strip()
+
+        candidates = [mode_name]
+        if mode_name in self.SETTLEMENT_ALIASES:
+            candidates.append(self.SETTLEMENT_ALIASES[mode_name])
+
+        for candidate in candidates:
+            if hasattr(og.x402SettlementMode, candidate):
+                return getattr(og.x402SettlementMode, candidate)
+
+        # Fallback chain
+        for fallback in ("BATCH_HASHED", "SETTLE_BATCH"):
+            if hasattr(og.x402SettlementMode, fallback):
+                logger.warning(
+                    "Settlement mode %s not found, falling back to %s",
+                    mode_name,
+                    fallback,
+                )
+                return getattr(og.x402SettlementMode, fallback)
+
+        raise ValueError(f"No compatible x402 settlement mode enum found (tried {mode_name})")
+
+    def _fallback_settlement_modes(self, og: Any, primary_mode: Any) -> list[Any]:
+        candidates: list[Any] = []
+
+        # Try PRIVATE mode
+        for name in ("PRIVATE", "SETTLE_PRIVATE"):
+            if hasattr(og.x402SettlementMode, name):
+                mode = getattr(og.x402SettlementMode, name)
+                if mode != primary_mode:
+                    candidates.append(mode)
+                break
+
+        # Try individual settlement modes
+        for name in ("SETTLE", "INDIVIDUAL_FULL", "SETTLE_METADATA"):
+            if hasattr(og.x402SettlementMode, name):
+                mode = getattr(og.x402SettlementMode, name)
+                if mode != primary_mode and mode not in candidates:
+                    candidates.append(mode)
+
+        return candidates
+
+    # ── Approval ──────────────────────────────────────────────────────
+
+    def _ensure_approval(self, client: Any) -> None:
+        if PredictionClient._approval_done:
+            return
+
+        ensure_fn = getattr(client, "ensure_opg_approval", None)
+        if not callable(ensure_fn):
+            return
+
+        try:
+            # Use opg_amount (the param name the SDK expects)
+            ensure_fn(opg_amount=settings.opengradient_approval_amount)
+            PredictionClient._approval_done = True
+        except Exception as e:
+            logger.warning("OPG approval failed: %s", e)
+
+    # ── Receipt extraction ────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_receipt(result: Any) -> str:
+        candidates = [
+            "payment_hash",
+            "x402_payment_hash",
+            "receipt_id",
+            "settlement_hash",
+            "transaction_hash",
+            "tx_hash",
+        ]
+        for field in candidates:
+            val = getattr(result, field, None)
+            if val:
+                return str(val)
+
+        if isinstance(result, dict):
+            for field in candidates:
+                val = result.get(field)
+                if val:
+                    return str(val)
+
+        return f"unknown-{uuid.uuid4().hex[:12]}"
+
+    # ── Chat content extraction ───────────────────────────────────────
+
+    @staticmethod
+    def _extract_chat_content(response: Any) -> str | None:
+        # object.chat_output.content
+        chat_output = getattr(response, "chat_output", None)
+        if isinstance(chat_output, dict) and "content" in chat_output:
+            return chat_output["content"]
+
+        # dict response
+        if isinstance(response, dict):
+            co = response.get("chat_output") or {}
+            if isinstance(co, dict) and "content" in co:
+                return co["content"]
+            if "content" in response:
+                return response["content"]
+
+        # choices-based response
+        choices = getattr(response, "choices", None)
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            message = getattr(first, "message", None)
+            if message is not None:
+                content = getattr(message, "content", None)
+                if content:
+                    return content
+            if isinstance(first, dict):
+                msg = first.get("message") or {}
+                if isinstance(msg, dict) and msg.get("content"):
+                    return msg["content"]
+
+        # completion_output fallback
+        if hasattr(response, "completion_output"):
+            return getattr(response, "completion_output")
+
+        return None
+
+    # ── Async helper ──────────────────────────────────────────────────
+
+    @staticmethod
+    async def _resolve_maybe_async(result: Any) -> Any:
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    # ── Main predict method ───────────────────────────────────────────
 
     async def predict(
         self, symbol: str, timeframe: str, market_data: dict
@@ -41,6 +227,7 @@ class PredictionClient:
             raise HTTPException(503, "OpenGradient not configured")
 
         try:
+            self._ensure_strenum_compat()
             import opengradient as og
         except ImportError:
             if self.allow_mock:
@@ -48,54 +235,96 @@ class PredictionClient:
             raise HTTPException(503, "opengradient SDK not installed")
 
         llm = og.LLM(private_key=settings.opengradient_private_key)
-
-        if not PredictionClient._approval_done:
-            try:
-                llm.ensure_opg_approval(min_allowance=settings.opengradient_approval_amount)
-                PredictionClient._approval_done = True
-            except Exception as e:
-                logger.warning("OPG approval failed: %s", e)
+        self._ensure_approval(llm)
 
         user_prompt = build_user_prompt(symbol, timeframe, market_data)
+        messages = [
+            {"role": "system", "content": PREDICTION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        settlement_mode = self._resolve_settlement(og)
+        settlement_mode_name = getattr(settlement_mode, "name", settings.opengradient_settlement_mode)
 
         try:
-            result = await llm.chat(
-                model=self._resolve_model(og),
-                messages=[
-                    {"role": "system", "content": PREDICTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=800,
-                temperature=0.0,
-                x402_settlement_mode=self._resolve_settlement(og),
-            )
-        except Exception as e:
-            # OpenGradient SDK may wrap HTTP 402/transport errors in RuntimeError.
-            logger.exception("OpenGradient prediction request failed: %s", e)
-            if self.allow_mock:
-                logger.warning("Falling back to mock prediction due to OpenGradient error")
-                return self._mock_prediction(symbol, timeframe, market_data)
+            result = await self._invoke_chat(llm, og, messages, settlement_mode)
+        except Exception as exc:
+            exc_msg = str(exc)
 
-            message = str(e)
-            status_code = 503
-            if "402" in message or "Payment Required" in message:
-                status_code = 402
-            raise HTTPException(status_code, f"OpenGradient request failed: {message}")
+            # Retry with fallback settlement modes on "event not found" errors
+            if "event not found" in exc_msg.lower():
+                result = None
+                for retry_mode in self._fallback_settlement_modes(og, settlement_mode):
+                    retry_name = getattr(retry_mode, "name", "unknown")
+                    logger.warning(
+                        "Settlement event not found with mode=%s, retrying with mode=%s",
+                        settlement_mode_name,
+                        retry_name,
+                    )
+                    try:
+                        result = await self._invoke_chat(llm, og, messages, retry_mode)
+                        settlement_mode_name = retry_name
+                        break
+                    except Exception as retry_exc:
+                        if "event not found" not in str(retry_exc).lower():
+                            raise
 
-        raw_content = result.chat_output.get("content", "")
-        # Strip markdown code fences if present
-        cleaned = raw_content.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1]
-        if cleaned.endswith("```"):
-            cleaned = cleaned.rsplit("```", 1)[0]
-        cleaned = cleaned.strip()
+                if result is not None:
+                    pass  # fall through to parsing below
+                elif self.allow_mock:
+                    logger.warning("All settlement modes failed, falling back to mock")
+                    return self._mock_prediction(symbol, timeframe, market_data)
+                else:
+                    raise HTTPException(502, f"OpenGradient settlement failed: {exc_msg}")
+            else:
+                logger.exception("OpenGradient prediction request failed: %s", exc)
+                if self.allow_mock:
+                    logger.warning("Falling back to mock prediction due to OpenGradient error")
+                    return self._mock_prediction(symbol, timeframe, market_data)
+
+                status_code = 503
+                if "402" in exc_msg or "Payment Required" in exc_msg:
+                    status_code = 402
+                raise HTTPException(status_code, f"OpenGradient request failed: {exc_msg}")
+
+        # Parse response
+        raw_content = self._extract_chat_content(result)
+        if raw_content is None:
+            logger.error("Could not extract content from OpenGradient response: %s", type(result))
+            raise HTTPException(502, "Empty response from AI model")
+
+        if isinstance(raw_content, str):
+            cleaned = raw_content.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1]
+            if cleaned.endswith("```"):
+                cleaned = cleaned.rsplit("```", 1)[0]
+            cleaned = cleaned.strip()
+        else:
+            cleaned = raw_content
 
         try:
-            payload = json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            logger.error("Failed to parse LLM response: %s\nRaw: %s", e, raw_content)
-            raise HTTPException(502, "Invalid prediction response from AI model")
+            if isinstance(cleaned, dict):
+                payload = cleaned
+            else:
+                payload = json.loads(cleaned)
+        except json.JSONDecodeError:
+            # Try extracting JSON from surrounding text
+            if isinstance(cleaned, str):
+                start = cleaned.find("{")
+                end = cleaned.rfind("}")
+                if start >= 0 and end > start:
+                    try:
+                        payload = json.loads(cleaned[start : end + 1])
+                    except json.JSONDecodeError:
+                        logger.error("Failed to parse LLM response:\n%s", raw_content)
+                        raise HTTPException(502, "Invalid prediction response from AI model")
+                else:
+                    logger.error("Failed to parse LLM response:\n%s", raw_content)
+                    raise HTTPException(502, "Invalid prediction response from AI model")
+            else:
+                logger.error("Failed to parse LLM response:\n%s", raw_content)
+                raise HTTPException(502, "Invalid prediction response from AI model")
 
         receipt_id = self._extract_receipt(result)
 
@@ -105,32 +334,26 @@ class PredictionClient:
             tee_signature=getattr(result, "tee_signature", None),
             transaction_hash=getattr(result, "transaction_hash", None),
             model=settings.opengradient_model,
-            settlement_mode=settings.opengradient_settlement_mode,
+            settlement_mode=settlement_mode_name,
         )
 
-    def _resolve_model(self, og):
-        raw = settings.opengradient_model
-        attr = raw.replace("/", "_").replace("-", "_").replace(".", "_").upper()
-        return getattr(og.TEE_LLM, attr, og.TEE_LLM.CLAUDE_SONNET_4_6)
+    async def _invoke_chat(self, llm: Any, og: Any, messages: list[dict], settlement_mode: Any) -> Any:
+        result = llm.chat(
+            model=self._resolve_model(og),
+            messages=messages,
+            x402_settlement_mode=settlement_mode,
+            temperature=0,
+            max_tokens=800,
+        )
+        return await self._resolve_maybe_async(result)
 
-    def _resolve_settlement(self, og):
-        raw = settings.opengradient_settlement_mode
-        return getattr(og.x402SettlementMode, raw, og.x402SettlementMode.BATCH_HASHED)
-
-    @staticmethod
-    def _extract_receipt(result) -> str:
-        for field in ("payment_hash", "x402_payment_hash", "receipt_id"):
-            val = getattr(result, field, None)
-            if val:
-                return str(val)
-        return f"unknown-{uuid.uuid4().hex[:12]}"
+    # ── Mock prediction ───────────────────────────────────────────────
 
     @staticmethod
     def _mock_prediction(symbol: str, timeframe: str, market_data: dict) -> PredictionResult:
         price = market_data.get("price_usd", 100.0) or 100.0
         change = market_data.get("change_1h_pct", 0.0) or 0.0
 
-        # Simple heuristic-based mock
         momentum = change / 100.0
         multiplier = 1.0 + momentum * (0.5 if timeframe == "1h" else 1.2)
         target = round(price * multiplier, 4)

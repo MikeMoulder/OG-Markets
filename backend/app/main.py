@@ -78,9 +78,16 @@ allowed_origins = _allowed_origins()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(dict.fromkeys(allowed_origins)),
+    allow_origin_regex=settings.frontend_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+logger.info(
+    "CORS configured with allow_origins=%s allow_origin_regex=%s",
+    allowed_origins,
+    settings.frontend_origin_regex,
 )
 
 app.include_router(tokens_router, prefix="/api")

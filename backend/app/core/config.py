@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     app_name: str = "OG Markets"
     frontend_origin: str = "https://og-markets.vercel.app"
     frontend_origins: str | None = None
+    frontend_origin_regex: str | None = r"https://.*\.vercel\.app"
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./og_markets.db"

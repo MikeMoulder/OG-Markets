@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,8 +74,10 @@ async def generate_prediction(
             detail=f"Invalid prediction payload from model; missing: {', '.join(missing_fields)}",
         )
 
-    # 5. Store in database
-    pred = Prediction(
+    # 5. Store in database (best effort). If persistence fails (e.g. schema drift),
+    # continue serving the fresh prediction response instead of returning a 500.
+    response_prediction = PredictionData(
+        id=0,
         symbol=symbol,
         timeframe=timeframe,
         current_price=prompt_data["price_usd"],
@@ -83,21 +87,35 @@ async def generate_prediction(
         confidence_pct=payload["confidence_pct"],
         direction=payload["direction"],
         reasoning=payload["reasoning"],
-        key_factors=json.dumps(payload["key_factors"]),
-        risk_factors=json.dumps(payload["risk_factors"]),
-        model_used=prediction_result.model,
-        settlement_mode=prediction_result.settlement_mode,
-        receipt_id=prediction_result.receipt_id,
-        tee_signature=prediction_result.tee_signature,
-        transaction_hash=prediction_result.transaction_hash,
+        key_factors=payload["key_factors"],
+        risk_factors=payload["risk_factors"],
+        created_at=datetime.now(timezone.utc).isoformat(),
     )
-    db.add(pred)
-    await db.commit()
-    await db.refresh(pred)
 
-    # 6. Build response
-    return PredictionResponse(
-        prediction=PredictionData(
+    try:
+        pred = Prediction(
+            symbol=symbol,
+            timeframe=timeframe,
+            current_price=prompt_data["price_usd"],
+            target_price=payload["target_price"],
+            range_low=payload["range_low"],
+            range_high=payload["range_high"],
+            confidence_pct=payload["confidence_pct"],
+            direction=payload["direction"],
+            reasoning=payload["reasoning"],
+            key_factors=json.dumps(payload["key_factors"]),
+            risk_factors=json.dumps(payload["risk_factors"]),
+            model_used=prediction_result.model,
+            settlement_mode=prediction_result.settlement_mode,
+            receipt_id=prediction_result.receipt_id,
+            tee_signature=prediction_result.tee_signature,
+            transaction_hash=prediction_result.transaction_hash,
+        )
+        db.add(pred)
+        await db.commit()
+        await db.refresh(pred)
+
+        response_prediction = PredictionData(
             id=pred.id,
             symbol=pred.symbol,
             timeframe=pred.timeframe,
@@ -111,7 +129,14 @@ async def generate_prediction(
             key_factors=payload["key_factors"],
             risk_factors=payload["risk_factors"],
             created_at=pred.created_at.isoformat() + "Z",
-        ),
+        )
+    except SQLAlchemyError as e:
+        await db.rollback()
+        logger.exception("Prediction persistence failed; serving non-persisted result: %s", e)
+
+    # 6. Build response
+    return PredictionResponse(
+        prediction=response_prediction,
         proof=ProofBundle(
             model=prediction_result.model,
             settlement_mode=prediction_result.settlement_mode,

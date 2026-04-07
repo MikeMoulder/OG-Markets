@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import enum
 import inspect
 import json
 import logging
 import random
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException
+import httpx
 
 from ..core.config import settings
 from .prompts import PREDICTION_SYSTEM_PROMPT, build_user_prompt
@@ -216,6 +219,128 @@ class PredictionClient:
             return await result
         return result
 
+    @staticmethod
+    def _is_payment_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "402" in message or "payment required" in message
+
+    @staticmethod
+    def _parse_prediction_payload(raw_content: Any) -> dict:
+        if isinstance(raw_content, str):
+            cleaned = raw_content.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1]
+            if cleaned.endswith("```"):
+                cleaned = cleaned.rsplit("```", 1)[0]
+            cleaned = cleaned.strip()
+        else:
+            cleaned = raw_content
+
+        try:
+            if isinstance(cleaned, dict):
+                return cleaned
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            if isinstance(cleaned, str):
+                start = cleaned.find("{")
+                end = cleaned.rfind("}")
+                if start >= 0 and end > start:
+                    try:
+                        return json.loads(cleaned[start : end + 1])
+                    except json.JSONDecodeError as exc:
+                        raise HTTPException(502, "Invalid prediction response from AI model") from exc
+
+            raise HTTPException(502, "Invalid prediction response from AI model")
+
+    async def _invoke_chat_with_retry_window(
+        self,
+        llm: Any,
+        og: Any,
+        messages: list[dict],
+        settlement_mode: Any,
+    ) -> Any:
+        deadline = time.monotonic() + max(1, settings.opengradient_fallback_after_seconds)
+        last_exc: Exception | None = None
+        attempts = 0
+
+        while time.monotonic() < deadline:
+            attempts += 1
+            remaining = max(0.2, deadline - time.monotonic())
+            try:
+                return await asyncio.wait_for(
+                    self._invoke_chat(llm, og, messages, settlement_mode),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                last_exc = RuntimeError("OpenGradient request timed out")
+                break
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_payment_error(exc):
+                    raise
+
+                sleep_for = min(1.0, max(0.0, deadline - time.monotonic()))
+                if sleep_for <= 0:
+                    break
+
+                logger.warning(
+                    "OpenGradient payment error (attempt=%s), retrying within %ss window",
+                    attempts,
+                    settings.opengradient_fallback_after_seconds,
+                )
+                await asyncio.sleep(sleep_for)
+
+        if last_exc is not None:
+            raise last_exc
+
+        raise RuntimeError("OpenGradient request failed within retry window")
+
+    async def _predict_via_openrouter(self, messages: list[dict]) -> PredictionResult:
+        if not settings.openrouter_enabled or not settings.openrouter_api_key:
+            raise HTTPException(503, "OpenRouter fallback not configured")
+
+        url = f"{settings.openrouter_base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {settings.openrouter_api_key}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "model": settings.openrouter_model,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": 800,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(url, headers=headers, json=body)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(502, f"OpenRouter fallback request failed: {exc}") from exc
+        except Exception as exc:
+            raise HTTPException(502, f"OpenRouter fallback request failed: {exc}") from exc
+
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise HTTPException(502, "OpenRouter fallback returned empty response")
+
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not content:
+            raise HTTPException(502, "OpenRouter fallback returned empty content")
+
+        payload = self._parse_prediction_payload(content)
+
+        return PredictionResult(
+            payload=payload,
+            receipt_id=f"fallback-{uuid.uuid4().hex[:16]}",
+            tee_signature=None,
+            transaction_hash="external",
+            model=f"openrouter/{settings.openrouter_model}",
+            settlement_mode="FALLBACK_OPENROUTER",
+        )
+
     # ── Main predict method ───────────────────────────────────────────
 
     async def predict(
@@ -247,7 +372,7 @@ class PredictionClient:
         settlement_mode_name = getattr(settlement_mode, "name", settings.opengradient_settlement_mode)
 
         try:
-            result = await self._invoke_chat(llm, og, messages, settlement_mode)
+            result = await self._invoke_chat_with_retry_window(llm, og, messages, settlement_mode)
         except Exception as exc:
             exc_msg = str(exc)
 
@@ -262,7 +387,7 @@ class PredictionClient:
                         retry_name,
                     )
                     try:
-                        result = await self._invoke_chat(llm, og, messages, retry_mode)
+                        result = await self._invoke_chat_with_retry_window(llm, og, messages, retry_mode)
                         settlement_mode_name = retry_name
                         break
                     except Exception as retry_exc:
@@ -271,13 +396,27 @@ class PredictionClient:
 
                 if result is not None:
                     pass  # fall through to parsing below
-                elif self.allow_mock:
-                    logger.warning("All settlement modes failed, falling back to mock")
-                    return self._mock_prediction(symbol, timeframe, market_data)
                 else:
-                    raise HTTPException(502, f"OpenGradient settlement failed: {exc_msg}")
+                    logger.warning("All settlement modes failed, attempting OpenRouter fallback")
+                    try:
+                        return await self._predict_via_openrouter(messages)
+                    except HTTPException:
+                        if self.allow_mock:
+                            logger.warning("OpenRouter fallback unavailable; using mock prediction")
+                            return self._mock_prediction(symbol, timeframe, market_data)
+                        raise HTTPException(502, f"OpenGradient settlement failed: {exc_msg}")
             else:
                 logger.exception("OpenGradient prediction request failed: %s", exc)
+                if self._is_payment_error(exc) or "timed out" in exc_msg.lower():
+                    logger.warning(
+                        "OpenGradient unavailable (payment/timeout). Attempting OpenRouter fallback"
+                    )
+                    try:
+                        return await self._predict_via_openrouter(messages)
+                    except HTTPException:
+                        if self.allow_mock:
+                            logger.warning("OpenRouter fallback unavailable; using mock prediction")
+                            return self._mock_prediction(symbol, timeframe, market_data)
                 if self.allow_mock:
                     logger.warning("Falling back to mock prediction due to OpenGradient error")
                     return self._mock_prediction(symbol, timeframe, market_data)
@@ -293,38 +432,11 @@ class PredictionClient:
             logger.error("Could not extract content from OpenGradient response: %s", type(result))
             raise HTTPException(502, "Empty response from AI model")
 
-        if isinstance(raw_content, str):
-            cleaned = raw_content.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[-1]
-            if cleaned.endswith("```"):
-                cleaned = cleaned.rsplit("```", 1)[0]
-            cleaned = cleaned.strip()
-        else:
-            cleaned = raw_content
-
         try:
-            if isinstance(cleaned, dict):
-                payload = cleaned
-            else:
-                payload = json.loads(cleaned)
-        except json.JSONDecodeError:
-            # Try extracting JSON from surrounding text
-            if isinstance(cleaned, str):
-                start = cleaned.find("{")
-                end = cleaned.rfind("}")
-                if start >= 0 and end > start:
-                    try:
-                        payload = json.loads(cleaned[start : end + 1])
-                    except json.JSONDecodeError:
-                        logger.error("Failed to parse LLM response:\n%s", raw_content)
-                        raise HTTPException(502, "Invalid prediction response from AI model")
-                else:
-                    logger.error("Failed to parse LLM response:\n%s", raw_content)
-                    raise HTTPException(502, "Invalid prediction response from AI model")
-            else:
-                logger.error("Failed to parse LLM response:\n%s", raw_content)
-                raise HTTPException(502, "Invalid prediction response from AI model")
+            payload = self._parse_prediction_payload(raw_content)
+        except HTTPException:
+            logger.error("Failed to parse LLM response:\n%s", raw_content)
+            raise
 
         receipt_id = self._extract_receipt(result)
 

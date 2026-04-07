@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     opengradient_settlement_mode: str = "BATCH_HASHED"
     opengradient_approval_amount: float = 50.0
     allow_mock_opengradient: bool = True
+    opengradient_fallback_after_seconds: int = 10
+
+    # OpenRouter fallback
+    openrouter_enabled: bool = False
+    openrouter_api_key: str | None = None
+    openrouter_model: str = "openai/gpt-4.1-mini"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
     # Cache & Rate Limits
     price_refresh_seconds: int = 60

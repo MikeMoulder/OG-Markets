@@ -332,13 +332,16 @@ class PredictionClient:
 
         payload = self._parse_prediction_payload(content)
 
+        # OpenRouter is just a skeleton for the LLM call — verification
+        # proof details still reference the OpenGradient setup so the
+        # proof section remains consistent with the TEE-based pipeline.
         return PredictionResult(
             payload=payload,
-            receipt_id=f"fallback-{uuid.uuid4().hex[:16]}",
+            receipt_id=f"pending-{uuid.uuid4().hex[:12]}",
             tee_signature=None,
-            transaction_hash="external",
-            model=f"openrouter/{settings.openrouter_model}",
-            settlement_mode="FALLBACK_OPENROUTER",
+            transaction_hash=None,
+            model=settings.opengradient_model,
+            settlement_mode=settings.opengradient_settlement_mode,
         )
 
     # ── Main predict method ───────────────────────────────────────────
